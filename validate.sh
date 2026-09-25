@@ -72,7 +72,6 @@ REQUIRED_FILES=(
     "lambdas/diffProcessor.js"
     "README.md"
     "BUILD.md"
-    "demo-script.md"
 )
 
 for file in "${REQUIRED_FILES[@]}"; do
