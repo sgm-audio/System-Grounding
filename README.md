@@ -26,16 +26,16 @@ Ground AI queries in verified local system state to eliminate hallucinations abo
 │  (Next.js)  │     │  (Query)     │
 └─────────────┘     └──────────────┘
 
-┌─────────────┐     ┌──────────────┐
-│     MCP     │────▶│  DynamoDB    │
-│  (Cursor)   │     │  (Query)     │
-└─────────────┘     └──────────────┘
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐
+│     MCP     │────▶│  Dashboard   │────▶│  DynamoDB    │
+│  (Cursor)   │     │  (/api/ask)  │     │  (Query)     │
+└─────────────┘     └──────────────┘     └──────────────┘
 ```
 
 **Flow:**
 1. **Agent → API Gateway → Lambda → DynamoDB**: Python agent collects system state (packages, configs, env vars, services) and sends to ingestion API
 2. **DynamoDB ↔ Diff Processor**: DynamoDB Streams trigger Lambda to compute diffs and write `CHANGE#` records for audit trail
-3. **Dashboard / MCP → DynamoDB**: Next.js dashboard and Cursor MCP server query verified state for grounded AI responses
+3. **Dashboard / MCP → DynamoDB**: The Next.js dashboard queries verified state for grounded AI responses; the Cursor MCP server calls the dashboard's `/api/ask` endpoint (`GROUNDING_API_URL`), which in turn queries DynamoDB
 
 ## Features
 
@@ -97,6 +97,10 @@ git push origin main
 
 ### Step 4: Run the Local Agent
 
+The ingest endpoint requires an API key (`x-api-key`). The stack creates one
+and exports its key id as the `IngestApiKeyId` output; retrieve the actual
+key value with `get-api-key --include-value`:
+
 ```bash
 # Get the ingest API URL from CloudFormation outputs
 INGEST_URL=$(aws cloudformation describe-stacks \
@@ -104,10 +108,19 @@ INGEST_URL=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`IngestApiUrl`].OutputValue' \
   --output text)
 
-# Run the agent
+# Get the API key value (IngestApiKeyId output holds the key id)
+INGEST_KEY_ID=$(aws cloudformation describe-stacks \
+  --stack-name system-grounding \
+  --query 'Stacks[0].Outputs[?OutputKey==`IngestApiKeyId`].OutputValue' \
+  --output text)
+INGEST_KEY=$(aws apigateway get-api-key \
+  --api-key "$INGEST_KEY_ID" --include-value --query 'value' --output text)
+
+# Run the agent (alternatively: export INGEST_API_KEY="$INGEST_KEY")
 python agent/agent.py \
   --device-id "framework-13" \
   --api-url "$INGEST_URL" \
+  --api-key "$INGEST_KEY" \
   --interval 60
 ```
 
@@ -134,10 +147,12 @@ Environment variables matching these patterns are automatically excluded:
 
 ```python
 ENV_DENYLIST_PATTERNS = [
-    r"SECRET", r"TOKEN", r"PASSWORD",
+    r"SECRET", r"TOKEN", r"PASSWORD", r"API_KEY", r"INGEST_API_KEY",
     r"AWS_", r"GITHUB_", r"NPM_TOKEN", r"DOCKER_PASSWORD"
 ]
 ```
+
+See `agent/agent.py` for the authoritative list.
 
 ### Adding New Record Types
 
@@ -185,23 +200,34 @@ all_records.extend(collect_services())
 ## Project Structure
 
 ```
-/workspace
-├── template.yaml          # CloudFormation stack
+/
+├── template.yaml          # CloudFormation stack (deployed Lambda code lives
+│                          # inline here as ZipFile functions)
+├── validate.sh            # End-to-end validation script (run in CI)
 ├── agent/
-│   └── agent.py           # Python state collector
+│   ├── agent.py           # Python state collector
+│   └── requirements.txt
 ├── lambdas/
-│   ├── ingestApi.js       # API ingestion handler
-│   └── diffProcessor.js   # Stream processor for diffs
+│   ├── ingestApi.js       # Standalone ingest handler variant + tests
+│   ├── diffProcessor.js   # Standalone diff processor variant + tests
+│   └── __tests__/         # Jest suite (see STATUS notes in the sources)
 ├── dashboard/
 │   ├── pages/
 │   │   ├── index.js       # Main dashboard UI
+│   │   ├── _app.js        # Custom App (global CSS import)
 │   │   └── api/ask.js     # Grounded query endpoint
 │   └── package.json
 ├── mcp/
 │   ├── src/index.ts       # Cursor MCP server
 │   └── package.json
+├── BUILD.md               # Local development / testing / deployment guide
 └── README.md              # This file
 ```
+
+> **Note**: The Lambda functions actually deployed by CloudFormation are the
+> inline `ZipFile` definitions in `template.yaml`. The files in `lambdas/`
+> are standalone variants covered by the Jest suite and currently diverge
+> from the deployed code (see the `STATUS: research` notes in those files).
 
 ## License
 
