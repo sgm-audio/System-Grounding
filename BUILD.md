@@ -87,6 +87,13 @@ npm run start
 # The server runs on stdio (for Cursor integration)
 ```
 
+**Environment Variables:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GROUNDING_API_URL` | Dashboard grounding endpoint the MCP server calls | `http://localhost:3000/api/ask` |
+| `DEVICE_ID` | Device whose state is queried (sent as `x-device-id`) | `framework-13` |
+
 **Configure in Cursor IDE:**
 
 1. Open Cursor Settings → MCP
@@ -99,6 +106,7 @@ npm run start
      }
    }
    ```
+   (Optionally add an `"env"` block setting `GROUNDING_API_URL` / `DEVICE_ID`.)
 
 ### Agent (Python)
 
