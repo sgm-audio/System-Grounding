@@ -230,7 +230,10 @@ describe('handler', () => {
                     eventID: '2',
                     dynamodb: {
                         SequenceNumber: 'seq-bad',
-                        NewImage: null // This will cause an error
+                        NewImage: {
+                            id: { S: '123' },
+                            malformed: {} // Invalid AttributeValue (no type) causes an error
+                        }
                     }
                 }
             ]

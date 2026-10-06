@@ -1,10 +1,28 @@
+// STATUS: research
+// This file is NOT the code deployed by template.yaml. The deployed ingest
+// Lambda is the inline ZipFile in template.yaml, which uses a different
+// contract ({ deviceId, records: [...] } batches written as DEVICE#/TYPE#
+// items with TTLs). This standalone variant writes the request body directly
+// as a single item. Reconcile or remove before relying on either.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
 
 const client = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(client);
 
-const TABLE_NAME = process.env.STATE_TABLE || 'StateTable';
+// Lazily created so the document client picks up (mocked) clients in tests;
+// equivalent at runtime since Lambda env is fixed before the handler runs.
+let docClient;
+function getDocClient() {
+    if (!docClient) {
+        docClient = DynamoDBDocumentClient.from(client);
+    }
+    return docClient;
+}
+
+// Read at request time so the table name is configurable per environment.
+function getTableName() {
+    return process.env.STATE_TABLE || 'StateTable';
+}
 
 /**
  * Lambda handler for API Gateway POST /ingest endpoint.
@@ -64,11 +82,11 @@ async function handler(event) {
     // Write to DynamoDB
     try {
         const putCommand = new PutCommand({
-            TableName: TABLE_NAME,
+            TableName: getTableName(),
             Item: body
         });
 
-        await docClient.send(putCommand);
+        await getDocClient().send(putCommand);
 
         return {
             statusCode: 201,
@@ -95,7 +113,7 @@ async function handler(event) {
  * @returns {string|null} - Error message if invalid, null if valid
  */
 function validatePayload(payload) {
-    if (!payload || typeof payload !== 'object') {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
         return 'Payload must be a valid object';
     }
 

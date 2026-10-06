@@ -1,3 +1,8 @@
+// STATUS: research
+// This file is NOT the code deployed by template.yaml. The deployed diff
+// processor is the inline ZipFile in template.yaml, which writes CHANGE#
+// audit records back to the table. This standalone variant only logs diffs.
+// Reconcile or remove before relying on either.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 
@@ -7,16 +12,23 @@ const docClient = DynamoDBDocumentClient.from(client);
 /**
  * Computes the difference between old and new objects.
  * - If no oldItem exists (INSERT), returns { added: [keys] }
- * - If oldItem exists (MODIFY), returns { changed: { key: { old, new } } }
- * @param {Object} newItem - The new item from the stream
+ * - If no newItem exists (REMOVE), returns { removed: [keys] }
+ * - If both exist (MODIFY), returns { changed: { key: { old, new } } }
+ * @param {Object} newItem - The new item from the stream (may be undefined)
  * @param {Object} oldItem - The old item from the stream (may be undefined)
  * @returns {Object} - Diff result
  */
 function computeDiff(newItem, oldItem) {
     if (!oldItem) {
         // INSERT event - all keys are "added"
-        const added = Object.keys(newItem);
+        const added = Object.keys(newItem || {});
         return { added };
+    }
+
+    if (!newItem) {
+        // REMOVE event - all keys are "removed"
+        const removed = Object.keys(oldItem);
+        return { removed };
     }
 
     // MODIFY event - find changed keys
