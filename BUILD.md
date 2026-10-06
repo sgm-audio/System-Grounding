@@ -181,7 +181,7 @@ python agent.py --device-id test-device --dry-run
 `main`) performs an end-to-end check of the project:
 
 1. Verifies all required source files exist
-2. Lints the CloudFormation template (cfn-lint) and type-checks the MCP server (`tsc`)
+2. Lints the CloudFormation template (cfn-lint), the dashboard (`next lint`), and type-checks the MCP server (`tsc`)
 3. Starts the dashboard dev server and exercises the `/api/ask` endpoint
 4. Runs the Python agent with `--dry-run`
 5. Builds and starts the MCP server to verify it initializes

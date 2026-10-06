@@ -106,19 +106,18 @@ fi
 # 2b. ESLint for JavaScript/TypeScript (if configured)
 log_info "Checking for ESLint configuration..."
 if [ -f "dashboard/.eslintrc.json" ] || [ -f "dashboard/.eslintrc.js" ] || [ -f ".eslintrc.json" ]; then
-    if command -v eslint &> /dev/null; then
-        log_info "Running ESLint on dashboard..."
-        cd dashboard
-        if npm run lint 2>/dev/null; then
-            test_pass "ESLint passed for dashboard"
-        else
-            test_fail "ESLint failed for dashboard"
-        fi
-        cd ..
-    else
-        log_warn "eslint not installed. Install with: npm install -g eslint"
-        test_pass "ESLint skipped (eslint not installed)"
+    log_info "Running ESLint on dashboard..."
+    cd dashboard
+    if [ ! -d "node_modules" ]; then
+        npm install --silent 2>/dev/null || log_warn "Dashboard dependency installation may have issues"
     fi
+    # npm resolves the local eslint binary; no global install needed
+    if npm run lint 2>/dev/null; then
+        test_pass "ESLint passed for dashboard"
+    else
+        test_fail "ESLint failed for dashboard"
+    fi
+    cd ..
 else
     log_warn "No ESLint configuration found, skipping JS/TS linting"
     test_pass "ESLint skipped (no configuration)"
