@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
-import '../styles/globals.css';
 
 // Main dashboard page with state visualization and query playground
+// (global styles are imported in pages/_app.js)
 export default function Home() {
   const [query, setQuery] = useState('');
   const [response, setResponse] = useState(null);

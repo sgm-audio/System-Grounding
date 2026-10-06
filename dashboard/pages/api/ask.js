@@ -12,7 +12,7 @@ const client = new DynamoDBClient({
 
 const docClient = DynamoDBDocumentClient.from(client);
 
-const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || 'system-state';
+const TABLE_NAME = process.env.DYNAMODB_TABLE_NAME || 'SystemState';
 
 // Hardcoded keyword-to-record-type map
 const INTENT_MAP = [
@@ -36,8 +36,9 @@ function detectIntent(query) {
   return [...new Set(matchedTypes)];
 }
 
-async function fetchRecords(requiredTypes) {
+async function fetchRecords(requiredTypes, pk) {
   const items = {};
+  const missing = [];
   for (const type of requiredTypes) {
     const parts = type.split('#');
     if (parts.length >= 3) {
@@ -46,56 +47,67 @@ async function fetchRecords(requiredTypes) {
       try {
         const cmd = new GetCommand({
           TableName: TABLE_NAME,
-          Key: { PK: 'SYSTEM_STATE', SK: sk },
+          Key: { PK: pk, SK: sk },
         });
         const result = await docClient.send(cmd);
         if (result.Item) {
           items[sk] = result.Item;
+        } else {
+          missing.push(type);
         }
       } catch (e) {
         console.error(`Error fetching ${sk}:`, e);
+        missing.push(type);
       }
     } else {
-      // Partial type, use Query with begins_with
-      const prefix = `TYPE#${type}#`;
+      // Type (optionally with a specific id), use Query with begins_with.
+      // No trailing '#': a specific id like 'CONFIG#/etc/bazzite/portal.yaml'
+      // has an SK of exactly 'TYPE#CONFIG#/etc/bazzite/portal.yaml'.
+      const prefix = `TYPE#${type}`;
       try {
         const cmd = new QueryCommand({
           TableName: TABLE_NAME,
           KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
           ExpressionAttributeValues: {
-            ':pk': 'SYSTEM_STATE',
+            ':pk': pk,
             ':skPrefix': prefix,
           },
         });
         const result = await docClient.send(cmd);
-        for (const item of result.Items || []) {
+        const found = result.Items || [];
+        if (found.length === 0) {
+          missing.push(type);
+        }
+        for (const item of found) {
           items[item.SK] = item;
         }
       } catch (e) {
         console.error(`Error querying ${prefix}:`, e);
+        missing.push(type);
       }
     }
   }
-  return items;
+  return { items, missing };
 }
 
 function buildContextString(items) {
   const lines = [];
   const stale = [];
-  const missing = [];
   const now = Date.now();
 
   for (const [sk, item] of Object.entries(items)) {
     const data = item.data || {};
     const threshold = (item.stalenessThresholdSeconds || 86400) * 1000;
-    const updatedAt = item.updatedAt || 0;
-    const age = now - updatedAt;
+    // Ingest writes `lastCollected` as an ISO-8601 string.
+    const updatedAt = item.lastCollected ? Date.parse(item.lastCollected) : NaN;
+    const age = Number.isNaN(updatedAt) ? Infinity : now - updatedAt;
     const isStale = age > threshold;
 
     lines.push(`--- Record: ${sk} ---`);
     lines.push(`Data: ${JSON.stringify(data, null, 2)}`);
     if (isStale) {
-      lines.push(`⚠️ STALE (age: ${Math.round(age / 1000)}s, threshold: ${threshold / 1000}s)`);
+      const ageLabel = Number.isFinite(age) ? `${Math.round(age / 1000)}s` : 'unknown (no lastCollected)';
+      lines.push(`⚠️ STALE (age: ${ageLabel}, threshold: ${threshold / 1000}s)`);
       stale.push(sk);
     }
     lines.push('');
@@ -104,7 +116,6 @@ function buildContextString(items) {
   return {
     context: lines.join('\n'),
     stale,
-    missing,
   };
 }
 
@@ -137,12 +148,16 @@ export default async function handler(req, res) {
   const requiredTypes = detectIntent(query);
   console.log('Required types:', requiredTypes);
 
+  // Records are stored per device: PK = DEVICE#<deviceId>
+  // (see the inline ingest Lambda in template.yaml)
+  const pk = `DEVICE#${deviceId}`;
+
   // Fetch records from DynamoDB
-  const items = await fetchRecords(requiredTypes);
+  const { items, missing } = await fetchRecords(requiredTypes, pk);
   console.log('Fetched items:', Object.keys(items));
 
   // Build context string
-  const { context, stale, missing } = buildContextString(items);
+  const { context, stale } = buildContextString(items);
 
   // Compute confidence
   const confidenceScore = computeConfidence(stale, missing);

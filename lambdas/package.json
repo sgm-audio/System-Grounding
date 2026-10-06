@@ -1,0 +1,17 @@
+{
+  "name": "system-grounding-lambdas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference implementations and Jest tests for the System Grounding Lambda functions",
+  "scripts": {
+    "test": "jest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/util-dynamodb": "^3.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

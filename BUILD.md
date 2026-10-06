@@ -9,9 +9,10 @@ Local development setup, testing, and deployment instructions for the System Gro
 1. [Prerequisites](#prerequisites)
 2. [Local Development Setup](#local-development-setup)
 3. [Running Tests](#running-tests)
-4. [Linting CloudFormation](#linting-cloudformation)
-5. [Deploying to AWS](#deploying-to-aws)
-6. [Troubleshooting](#troubleshooting)
+4. [Full Project Validation](#full-project-validation)
+5. [Linting CloudFormation](#linting-cloudformation)
+6. [Deploying to AWS](#deploying-to-aws)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -86,6 +87,13 @@ npm run start
 # The server runs on stdio (for Cursor integration)
 ```
 
+**Environment Variables:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GROUNDING_API_URL` | Dashboard grounding endpoint the MCP server calls | `http://localhost:3000/api/ask` |
+| `DEVICE_ID` | Device whose state is queried (sent as `x-device-id`) | `framework-13` |
+
 **Configure in Cursor IDE:**
 
 1. Open Cursor Settings → MCP
@@ -98,6 +106,7 @@ npm run start
      }
    }
    ```
+   (Optionally add an `"env"` block setting `GROUNDING_API_URL` / `DEVICE_ID`.)
 
 ### Agent (Python)
 
@@ -111,14 +120,16 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies
 pip install requests pyyaml
 
-# Run the agent
+# Run the agent (--api-key is required unless --dry-run is used;
+# alternatively export INGEST_API_KEY or API_KEY)
 python agent.py \
   --device-id "dev-machine" \
   --api-url "http://localhost:3000/api/ingest" \
+  --api-key "local-dev-key" \
   --interval 60
 ```
 
-**Note**: For local testing without AWS deployment, you'll need to mock the ingestion API endpoint.
+**Note**: For local testing without AWS deployment, you'll need to mock the ingestion API endpoint. Use `--dry-run` to verify collection without any endpoint or key.
 
 ---
 
@@ -146,30 +157,37 @@ npm test -- ingestApi.test.js
 
 - `__tests__/ingestApi.test.js` - Ingestion API handler tests
 - `__tests__/diffProcessor.test.js` - Diff processor tests
-- `__tests__/lambda.test.js` - General Lambda utility tests
 
 ### Dashboard Tests
 
-```bash
-cd dashboard
-
-# Install dependencies
-npm install
-
-# Run tests (if configured)
-npm test
-```
+The dashboard currently has no test suite configured (`dashboard/package.json`
+defines no `test` script). Use `npm run build` to verify it compiles.
 
 ### Agent Tests (Python)
 
+The agent currently has no pytest suite. Verify it locally with a dry run,
+which collects records and prints them without sending anything:
+
 ```bash
 cd agent
+python agent.py --device-id test-device --dry-run
+```
 
-# Install pytest (if not already installed)
-pip install pytest
+---
 
-# Run tests (if test files exist)
-pytest
+## Full Project Validation
+
+`validate.sh` (run by the GitHub Actions workflow on every push/PR to
+`main`) performs an end-to-end check of the project:
+
+1. Verifies all required source files exist
+2. Lints the CloudFormation template (cfn-lint), the dashboard (`next lint`), and type-checks the MCP server (`tsc`)
+3. Starts the dashboard dev server and exercises the `/api/ask` endpoint
+4. Runs the Python agent with `--dry-run`
+5. Builds and starts the MCP server to verify it initializes
+
+```bash
+./validate.sh
 ```
 
 ---
@@ -385,7 +403,7 @@ cd dashboard && npm install && npm run dev
 cd mcp && npm install && npm run build
 
 # Run agent
-python agent/agent.py --device-id "my-device" --api-url "https://..."
+python agent/agent.py --device-id "my-device" --api-url "https://..." --api-key "<x-api-key>"
 
 # Lint CloudFormation
 cfn-lint template.yaml

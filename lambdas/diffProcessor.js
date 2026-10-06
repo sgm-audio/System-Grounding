@@ -1,153 +1,123 @@
+// Canonical, testable copy of the inline ZipFile diff processor deployed by
+// template.yaml (resource DiffProcessorFunction). KEEP IN SYNC WITH THE
+// TEMPLATE: CloudFormation deploys the inline copy; this file exists so the
+// same logic is covered by the Jest suite. If you change one, change the other.
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, PutCommand, GetCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+const { unmarshall } = require('@aws-sdk/util-dynamodb');
 
 const client = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(client);
 
-/**
- * Computes the difference between old and new objects.
- * - If no oldItem exists (INSERT), returns { added: [keys] }
- * - If oldItem exists (MODIFY), returns { changed: { key: { old, new } } }
- * @param {Object} newItem - The new item from the stream
- * @param {Object} oldItem - The old item from the stream (may be undefined)
- * @returns {Object} - Diff result
- */
-function computeDiff(newItem, oldItem) {
-    if (!oldItem) {
-        // INSERT event - all keys are "added"
-        const added = Object.keys(newItem);
-        return { added };
+// Created lazily so tests can mock DynamoDBDocumentClient.from; at Lambda
+// runtime this is equivalent (env is fixed before the handler runs).
+let docClient;
+function getDocClient() {
+    if (!docClient) {
+        docClient = DynamoDBDocumentClient.from(client);
     }
-
-    // MODIFY event - find changed keys
-    const changed = {};
-    const allKeys = new Set([...Object.keys(newItem), ...Object.keys(oldItem)]);
-
-    for (const key of allKeys) {
-        const newVal = newItem[key];
-        const oldVal = oldItem[key];
-
-        // Compare values (simple equality check)
-        if (JSON.stringify(newVal) !== JSON.stringify(oldVal)) {
-            changed[key] = { old: oldVal, new: newVal };
-        }
-    }
-
-    return { changed };
+    return docClient;
 }
 
 /**
- * Lambda handler for processing DynamoDB Stream events.
- * Implements batch item failure collection for partial failures.
- * @param {Object} event - DynamoDB Stream event
- * @returns {Object} - Response with batchItemFailures if any failures occurred
+ * Computes the difference between old and new data objects.
+ * @param {Object} oldObj - Previous data (may be undefined for INSERT)
+ * @param {Object} newObj - New data
+ * @returns {Object} - Map of changed keys to { old, new } values
+ */
+function computeDiff(oldObj, newObj) {
+    const diff = {};
+    const allKeys = new Set([...Object.keys(oldObj || {}), ...Object.keys(newObj || {})]);
+    for (const key of allKeys) {
+        if (JSON.stringify(oldObj?.[key]) !== JSON.stringify(newObj?.[key])) {
+            diff[key] = { old: oldObj?.[key], new: newObj?.[key] };
+        }
+    }
+    return diff;
+}
+
+/**
+ * DynamoDB Streams handler: writes CHANGE# audit records for every
+ * INSERT/MODIFY/REMOVE event on the SystemState table.
+ * Implements partial batch failure reporting (ReportBatchItemFailures).
+ * @param {Object} event - DynamoDB Streams event
+ * @returns {Object} - { batchItemFailures }
  */
 async function handler(event) {
     const batchItemFailures = [];
+    const ttlDays = parseInt(process.env.TTL_DAYS) || 30;
+    const now = Date.now();
+    const ttl = Math.floor(now / 1000) + (ttlDays * 86400);
 
     for (const record of event.Records) {
         try {
-            const eventName = record.eventName; // INSERT, MODIFY, REMOVE
-            const dynamodb = record.dynamodb;
+            const eventName = record.eventName;
+            const streamRecord = record.dynamodb;
 
-            let newItem, oldItem;
+            // Stream images arrive as DynamoDB AttributeValue maps
+            // (e.g. deviceId: { S: 'framework-13' }); unmarshall them so
+            // keys, ids, and snapshots use plain values.
+            const newImage = streamRecord.NewImage ? unmarshall(streamRecord.NewImage) : undefined;
+            const oldImage = streamRecord.OldImage ? unmarshall(streamRecord.OldImage) : undefined;
 
-            if (dynamodb.NewImage) {
-                newItem = unmarshallDynamoDB(dynamodb.NewImage);
-            }
-            if (dynamodb.OldImage) {
-                oldItem = unmarshallDynamoDB(dynamodb.OldImage);
-            }
-
-            // Compute the diff
-            const diff = computeDiff(newItem, oldItem);
-
-            // Process based on event type
             if (eventName === 'REMOVE') {
-                // Handle removal - could archive or notify
-                console.log('Record removed:', { key: dynamodb.Keys, diff });
-            } else if (eventName === 'INSERT') {
-                console.log('New record inserted:', { data: newItem, diff });
-            } else if (eventName === 'MODIFY') {
-                console.log('Record modified:', { diff });
+                if (!oldImage) continue;
+
+                const deviceId = oldImage.deviceId;
+                const recordType = oldImage.recordType;
+                const id = oldImage.id;
+                const timestamp = new Date().toISOString();
+
+                await getDocClient().send(new PutCommand({
+                    TableName: process.env.TABLE_NAME,
+                    Item: {
+                        PK: `CHANGE#${deviceId}`,
+                        SK: `${timestamp}#DELETE#TYPE#${recordType}#${id}#${record.eventID}`,
+                        changeType: 'DELETE',
+                        recordType: recordType,
+                        deviceId: deviceId,
+                        changeDevice: deviceId,
+                        changeTimestamp: timestamp,
+                        oldSnapshot: oldImage.data || oldImage,
+                        ttl: ttl
+                    }
+                }));
+            } else if (eventName === 'INSERT' || eventName === 'MODIFY') {
+                if (!newImage) continue;
+
+                const deviceId = newImage.deviceId;
+                const recordType = newImage.recordType;
+                const id = newImage.id;
+                const timestamp = new Date().toISOString();
+
+                const diff = computeDiff(oldImage?.data || oldImage, newImage.data || newImage);
+
+                await getDocClient().send(new PutCommand({
+                    TableName: process.env.TABLE_NAME,
+                    Item: {
+                        PK: `CHANGE#${deviceId}`,
+                        SK: `${timestamp}#${eventName}#TYPE#${recordType}#${id}#${record.eventID}`,
+                        changeType: eventName,
+                        recordType: recordType,
+                        deviceId: deviceId,
+                        changeDevice: deviceId,
+                        changeTimestamp: timestamp,
+                        diff: diff,
+                        oldSnapshot: oldImage?.data || oldImage,
+                        newSnapshot: newImage.data || newImage,
+                        ttl: ttl
+                    }
+                }));
             }
-
-            // Additional processing logic can be added here
-            // For example: write to another table, send SNS notification, etc.
-
         } catch (error) {
-            console.error('Error processing record:', error);
-            // Add the failed record's sequence number to batchItemFailures
-            batchItemFailures.push({
-                itemIdentifier: record.dynamodb.SequenceNumber
-            });
+            console.error('Error processing record:', record.eventID, error);
+            batchItemFailures.push({ itemIdentifier: record.eventID });
         }
     }
 
-    // Return batchItemFailures if any failures occurred
-    if (batchItemFailures.length > 0) {
-        return { batchItemFailures };
-    }
-
-    return {};
-}
-
-/**
- * Helper function to unmarshall DynamoDB AttributeValues
- * @param {Object} item - DynamoDB AttributeValue map
- * @returns {Object} - Plain JavaScript object
- */
-function unmarshallDynamoDB(item) {
-    const result = {};
-    for (const [key, value] of Object.entries(item)) {
-        result[key] = unmarshallValue(value);
-    }
-    return result;
-}
-
-/**
- * Helper to unmarshall a single DynamoDB AttributeValue
- * @param {Object} value - DynamoDB AttributeValue
- * @returns {*} - JavaScript value
- */
-function unmarshallValue(value) {
-    const types = Object.keys(value);
-    if (types.length !== 1) {
-        throw new Error('Invalid AttributeValue: must have exactly one type');
-    }
-
-    const type = types[0];
-    const val = value[type];
-
-    switch (type) {
-        case 'S':
-            return val;
-        case 'N':
-            return Number(val);
-        case 'BOOL':
-            return val;
-        case 'NULL':
-            return null;
-        case 'L':
-            return val.map(unmarshallValue);
-        case 'M':
-            return unmarshallDynamoDB(val);
-        case 'SS':
-            return val;
-        case 'NS':
-            return val.map(Number);
-        case 'BS':
-            return val;
-        case 'B':
-            return Buffer.from(val, 'base64');
-        default:
-            throw new Error(`Unknown type: ${type}`);
-    }
+    return { batchItemFailures };
 }
 
 module.exports = {
     handler,
-    computeDiff,
-    unmarshallDynamoDB,
-    unmarshallValue
+    computeDiff
 };
