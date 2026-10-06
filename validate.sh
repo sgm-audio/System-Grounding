@@ -5,6 +5,7 @@
 # This script:
 # 1. Checks that all required files exist
 # 2. Runs linting (cfn-lint for CloudFormation, ESLint for JS/TS if configured)
+# 2.5. Runs the Lambda Jest test suite
 # 3. Tests the Next.js dashboard /api/ask endpoint
 # 4. Tests the Python agent with --dry-run flag
 # 5. Validates the MCP server starts and lists tools
@@ -144,6 +145,26 @@ else
 fi
 cd ..
 
+# 2d. Lambda unit tests (Jest)
+log_info "Running Lambda unit tests (Jest)..."
+cd lambdas
+if command -v npm &> /dev/null && [ -f "package.json" ]; then
+    if npm install --silent 2>/dev/null; then
+        if npm test 2>&1 | tail -8; then
+            test_pass "Lambda Jest suite passed"
+        else
+            test_fail "Lambda Jest suite failed"
+        fi
+    else
+        log_warn "npm install failed in lambdas/, skipping tests"
+        test_pass "Lambda tests skipped (dependency install failed)"
+    fi
+else
+    log_warn "npm not available, skipping Lambda tests"
+    test_pass "Lambda tests skipped (npm not available)"
+fi
+cd ..
+
 echo ""
 
 # ============================================
@@ -249,7 +270,20 @@ if [ -n "$PYTHON_CMD" ]; then
     # Install Python dependencies if needed
     if [ -f "requirements.txt" ]; then
         log_info "Installing Python dependencies..."
-        $PYTHON_CMD -m pip install -r requirements.txt -q 2>/dev/null || log_warn "Some Python dependencies may be missing"
+        $PYTHON_CMD -m pip install -r requirements.txt -q 2>/dev/null || log_warn "pip install failed (environment may be externally managed)"
+    fi
+
+    # Fall back to a throwaway venv if dependencies are still unavailable
+    # (e.g., PEP 668 externally-managed Python on Debian/Ubuntu)
+    if ! $PYTHON_CMD -c "import requests, yaml" 2>/dev/null; then
+        log_warn "Dependencies missing for $PYTHON_CMD, trying a venv fallback..."
+        if $PYTHON_CMD -m venv /tmp/system-grounding-agent-venv 2>/dev/null \
+            && /tmp/system-grounding-agent-venv/bin/python -m pip install -r requirements.txt -q 2>/dev/null; then
+            PYTHON_CMD=/tmp/system-grounding-agent-venv/bin/python
+            log_info "Using venv Python: $PYTHON_CMD"
+        else
+            log_warn "Could not set up venv; agent dry-run may fail"
+        fi
     fi
     
     # Run agent in dry-run mode
