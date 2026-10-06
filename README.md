@@ -139,7 +139,7 @@ aws cloudformation deploy \
 ```
 
 - **Default**: 30 days for change records
-- **Per-record**: Agents can set `stalenessThresholdSeconds` (default: 86400 = 24 hours)
+- **Per-record**: Agents can set `stalenessThresholdSeconds` (default: 86400 = 24 hours); it is persisted on each item and used both for TTL and for the dashboard's freshness check
 
 ### Denylist
 
@@ -208,9 +208,9 @@ all_records.extend(collect_services())
 │   ├── agent.py           # Python state collector
 │   └── requirements.txt
 ├── lambdas/
-│   ├── ingestApi.js       # Standalone ingest handler variant + tests
-│   ├── diffProcessor.js   # Standalone diff processor variant + tests
-│   └── __tests__/         # Jest suite (see STATUS notes in the sources)
+│   ├── ingestApi.js       # Testable copy of the deployed ingest handler
+│   ├── diffProcessor.js   # Testable copy of the deployed diff processor
+│   └── __tests__/         # Jest suite covering the deployed logic
 ├── dashboard/
 │   ├── pages/
 │   │   ├── index.js       # Main dashboard UI
@@ -226,8 +226,10 @@ all_records.extend(collect_services())
 
 > **Note**: The Lambda functions actually deployed by CloudFormation are the
 > inline `ZipFile` definitions in `template.yaml`. The files in `lambdas/`
-> are standalone variants covered by the Jest suite and currently diverge
-> from the deployed code (see the `STATUS: research` notes in those files).
+> are canonical, testable copies of that same logic covered by the Jest
+> suite. **Keep both in sync** — if you change one, change the other (a
+> future improvement would be packaging `lambdas/` directly instead of
+> using inline code).
 
 ## License
 

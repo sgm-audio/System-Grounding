@@ -1,397 +1,193 @@
-const { computeDiff, handler, unmarshallDynamoDB } = require('../diffProcessor');
-
-// Mock DynamoDB client - not needed for diffProcessor tests since it doesn't make DB calls
+// Tests for the deployed diff processor contract (see lambdas/diffProcessor.js,
+// kept in sync with the inline ZipFile in template.yaml).
 jest.mock('@aws-sdk/client-dynamodb', () => ({
     DynamoDBClient: jest.fn().mockImplementation(() => ({}))
 }));
 
+const mockSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
     DynamoDBDocumentClient: {
-        from: jest.fn().mockImplementation(() => ({
-            send: jest.fn()
-        }))
+        from: jest.fn(() => ({ send: mockSend }))
     },
-    PutCommand: jest.fn(),
-    GetCommand: jest.fn(),
-    DeleteCommand: jest.fn()
+    PutCommand: jest.fn((params) => params)
 }));
 
+const { handler, computeDiff } = require('../diffProcessor');
+
+// DynamoDB Streams deliver images as AttributeValue maps
+const av = {
+    str: (v) => ({ S: v }),
+    map: (obj) => ({
+        M: Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, av.str(v)]))
+    })
+};
+
+function image(obj) {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+        out[k] = typeof v === 'object' && v !== null ? av.map(v) : av.str(v);
+    }
+    return out;
+}
+
+function streamEvent(records) {
+    return { Records: records };
+}
+
+beforeAll(() => {
+    process.env.TABLE_NAME = 'SystemState';
+    process.env.TTL_DAYS = '7';
+});
+
+beforeEach(() => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValue({});
+});
+
 describe('computeDiff', () => {
-    describe('INSERT events (no oldItem)', () => {
-        it('should return added keys when there is no old item', () => {
-            const newItem = { id: '123', name: 'Test', status: 'active' };
-            const result = computeDiff(newItem, undefined);
-            
-            expect(result).toEqual({
-                added: ['id', 'name', 'status']
-            });
-        });
-
-        it('should return empty added array if newItem is empty', () => {
-            const newItem = {};
-            const result = computeDiff(newItem, undefined);
-            
-            expect(result).toEqual({
-                added: []
-            });
-        });
+    it('detects changed keys between old and new data', () => {
+        const diff = computeDiff({ name: 'a', status: 'active' }, { name: 'a', status: 'inactive' });
+        expect(diff).toEqual({ status: { old: 'active', new: 'inactive' } });
     });
 
-    describe('MODIFY events (with oldItem)', () => {
-        it('should detect changed keys between old and new items', () => {
-            const newItem = { id: '123', name: 'Updated Name', status: 'inactive' };
-            const oldItem = { id: '123', name: 'Original Name', status: 'active' };
-            
-            const result = computeDiff(newItem, oldItem);
-            
-            expect(result).toEqual({
-                changed: {
-                    name: { old: 'Original Name', new: 'Updated Name' },
-                    status: { old: 'active', new: 'inactive' }
-                }
-            });
-        });
+    it('reports added keys', () => {
+        const diff = computeDiff({}, { name: 'a' });
+        expect(diff).toEqual({ name: { old: undefined, new: 'a' } });
+    });
 
-        it('should return empty changed object if nothing changed', () => {
-            const newItem = { id: '123', name: 'Same', status: 'active' };
-            const oldItem = { id: '123', name: 'Same', status: 'active' };
-            
-            const result = computeDiff(newItem, oldItem);
-            
-            expect(result).toEqual({
-                changed: {}
-            });
-        });
+    it('reports removed keys', () => {
+        const diff = computeDiff({ name: 'a', extra: 'gone' }, { name: 'a' });
+        expect(diff.extra).toEqual({ old: 'gone', new: undefined });
+    });
 
-        it('should detect when a key is removed', () => {
-            const newItem = { id: '123', name: 'Test' };
-            const oldItem = { id: '123', name: 'Test', extraField: 'removed' };
-            
-            const result = computeDiff(newItem, oldItem);
-            
-            expect(result.changed.extraField).toEqual({ old: 'removed', new: undefined });
-        });
+    it('returns an empty diff when nothing changed', () => {
+        expect(computeDiff({ a: '1' }, { a: '1' })).toEqual({});
+    });
 
-        it('should detect when a new key is added', () => {
-            const newItem = { id: '123', name: 'Test', newField: 'added' };
-            const oldItem = { id: '123', name: 'Test' };
-            
-            const result = computeDiff(newItem, oldItem);
-            
-            expect(result.changed.newField).toEqual({ old: undefined, new: 'added' });
-        });
-
-        it('should handle nested objects comparison', () => {
-            const newItem = { id: '123', config: { enabled: true, count: 5 } };
-            const oldItem = { id: '123', config: { enabled: false, count: 3 } };
-            
-            const result = computeDiff(newItem, oldItem);
-            
-            expect(result).toEqual({
-                changed: {
-                    config: { 
-                        old: { enabled: false, count: 3 }, 
-                        new: { enabled: true, count: 5 } 
-                    }
-                }
-            });
-        });
-
-        it('should handle array comparison', () => {
-            const newItem = { id: '123', tags: ['a', 'b', 'c'] };
-            const oldItem = { id: '123', tags: ['a', 'b'] };
-            
-            const result = computeDiff(newItem, oldItem);
-            
-            expect(result.changed.tags).toEqual({ 
-                old: ['a', 'b'], 
-                new: ['a', 'b', 'c'] 
-            });
-        });
+    it('handles a missing old object (INSERT)', () => {
+        expect(computeDiff(undefined, { a: '1' })).toEqual({ a: { old: undefined, new: '1' } });
     });
 });
 
-describe('handler', () => {
-    const mockConsoleLog = jest.spyOn(console, 'log').mockImplementation();
-    const mockConsoleError = jest.spyOn(console, 'error').mockImplementation();
-
-    beforeEach(() => {
-        jest.clearAllMocks();
-    });
-
-    afterAll(() => {
-        mockConsoleLog.mockRestore();
-        mockConsoleError.mockRestore();
-    });
-
-    it('should process INSERT event successfully', async () => {
-        const event = {
-            Records: [{
-                eventName: 'INSERT',
-                eventID: '1',
-                dynamodb: {
-                    SequenceNumber: 'seq-001',
-                    NewImage: {
-                        id: { S: '123' },
-                        name: { S: 'New Item' },
-                        status: { S: 'active' }
-                    }
-                }
-            }]
-        };
-
-        const result = await handler(event);
-
-        expect(result).toEqual({});
-        expect(mockConsoleLog).toHaveBeenCalledWith(
-            'New record inserted:',
-            expect.objectContaining({
-                data: expect.objectContaining({ id: '123' }),
-                diff: expect.objectContaining({ added: expect.any(Array) })
-            })
-        );
-    });
-
-    it('should process MODIFY event successfully', async () => {
-        const event = {
-            Records: [{
-                eventName: 'MODIFY',
-                eventID: '2',
-                dynamodb: {
-                    SequenceNumber: 'seq-002',
-                    NewImage: {
-                        id: { S: '123' },
-                        name: { S: 'Updated' },
-                        status: { S: 'inactive' }
-                    },
-                    OldImage: {
-                        id: { S: '123' },
-                        name: { S: 'Original' },
-                        status: { S: 'active' }
-                    }
-                }
-            }]
-        };
-
-        const result = await handler(event);
-
-        expect(result).toEqual({});
-        expect(mockConsoleLog).toHaveBeenCalledWith(
-            'Record modified:',
-            expect.objectContaining({
-                diff: expect.objectContaining({ changed: expect.any(Object) })
-            })
-        );
-    });
-
-    it('should process REMOVE event successfully', async () => {
-        const event = {
-            Records: [{
-                eventName: 'REMOVE',
-                eventID: '3',
-                dynamodb: {
-                    SequenceNumber: 'seq-003',
-                    OldImage: {
-                        id: { S: '123' },
-                        name: { S: 'Deleted Item' }
-                    }
-                }
-            }]
-        };
-
-        const result = await handler(event);
-
-        expect(result).toEqual({});
-        expect(mockConsoleLog).toHaveBeenCalledWith(
-            'Record removed:',
-            expect.objectContaining({
-                diff: expect.any(Object)
-            })
-        );
-    });
-
-    it('should collect batch item failures when processing fails', async () => {
-        // Create an event that will cause an error (malformed DynamoDB image)
-        const event = {
-            Records: [
-                {
-                    eventName: 'INSERT',
-                    eventID: '1',
-                    dynamodb: {
-                        SequenceNumber: 'seq-good',
-                        NewImage: {
-                            id: { S: '123' },
-                            name: { S: 'Good Item' }
-                        }
-                    }
-                },
-                {
-                    eventName: 'INSERT',
-                    eventID: '2',
-                    dynamodb: {
-                        SequenceNumber: 'seq-bad',
-                        NewImage: {
-                            id: { S: '123' },
-                            malformed: {} // Invalid AttributeValue (no type) causes an error
-                        }
-                    }
-                }
-            ]
-        };
-
-        const result = await handler(event);
-
-        // Should have collected the failed record
-        expect(result.batchItemFailures).toHaveLength(1);
-        expect(result.batchItemFailures[0].itemIdentifier).toBe('seq-bad');
-        
-        // The good record should still be processed
-        expect(mockConsoleLog).toHaveBeenCalledWith(
-            'New record inserted:',
-            expect.anything()
-        );
-    });
-
-    it('should return empty response when all records succeed', async () => {
-        const event = {
-            Records: [{
-                eventName: 'INSERT',
-                eventID: '1',
-                dynamodb: {
-                    SequenceNumber: 'seq-001',
-                    NewImage: {
-                        id: { S: '123' },
-                        name: { S: 'Test' }
-                    }
-                }
-            }]
-        };
-
-        const result = await handler(event);
-
-        expect(result).toEqual({});
-        expect(result.batchItemFailures).toBeUndefined();
-    });
-
-    it('should handle multiple records with mixed outcomes', async () => {
-        const event = {
-            Records: [
-                {
-                    eventName: 'INSERT',
-                    eventID: '1',
-                    dynamodb: {
-                        SequenceNumber: 'seq-001',
-                        NewImage: { id: { S: '1' } }
-                    }
-                },
-                {
-                    eventName: 'MODIFY',
-                    eventID: '2',
-                    dynamodb: {
-                        SequenceNumber: 'seq-002',
-                        NewImage: { id: { S: '2' }, val: { N: '10' } },
-                        OldImage: { id: { S: '2' }, val: { N: '5' } }
-                    }
-                },
-                {
-                    eventName: 'REMOVE',
-                    eventID: '3',
-                    dynamodb: {
-                        SequenceNumber: 'seq-003',
-                        OldImage: { id: { S: '3' } }
-                    }
-                }
-            ]
-        };
-
-        const result = await handler(event);
-
-        expect(result).toEqual({});
-        expect(mockConsoleLog).toHaveBeenCalledTimes(3);
-    });
-});
-
-describe('unmarshallDynamoDB', () => {
-    it('should unmarshall simple string and number types', () => {
-        const item = {
-            id: { S: '123' },
-            count: { N: '42' },
-            active: { BOOL: true },
-            description: { S: 'Test item' }
-        };
-
-        const result = unmarshallDynamoDB(item);
-
-        expect(result).toEqual({
-            id: '123',
-            count: 42,
-            active: true,
-            description: 'Test item'
-        });
-    });
-
-    it('should unmarshall lists', () => {
-        const item = {
-            tags: { L: [{ S: 'a' }, { S: 'b' }, { S: 'c' }] },
-            scores: { L: [{ N: '1' }, { N: '2' }, { N: '3' }] }
-        };
-
-        const result = unmarshallDynamoDB(item);
-
-        expect(result).toEqual({
-            tags: ['a', 'b', 'c'],
-            scores: [1, 2, 3]
-        });
-    });
-
-    it('should unmarshall maps (nested objects)', () => {
-        const item = {
-            config: {
-                M: {
-                    enabled: { BOOL: true },
-                    settings: {
-                        M: {
-                            timeout: { N: '30' },
-                            retries: { N: '3' }
-                        }
-                    }
-                }
+describe('stream handler', () => {
+    it('writes a CHANGE# record for INSERT events using unmarshalled values', async () => {
+        const before = Math.floor(Date.now() / 1000);
+        const event = streamEvent([{
+            eventName: 'INSERT',
+            eventID: 'evt-1',
+            dynamodb: {
+                NewImage: image({
+                    PK: 'DEVICE#framework-13',
+                    SK: 'TYPE#SERVICE#sshd.service',
+                    deviceId: 'framework-13',
+                    recordType: 'SERVICE',
+                    id: 'sshd.service',
+                    data: { name: 'sshd.service', status: 'active' }
+                })
             }
-        };
+        }]);
 
-        const result = unmarshallDynamoDB(item);
+        const result = await handler(event);
 
-        expect(result).toEqual({
-            config: {
-                enabled: true,
-                settings: {
-                    timeout: 30,
-                    retries: 3
-                }
+        expect(result).toEqual({ batchItemFailures: [] });
+        expect(mockSend).toHaveBeenCalledTimes(1);
+        const put = mockSend.mock.calls[0][0];
+        expect(put.TableName).toBe('SystemState');
+        // PK must use the plain device id, not an AttributeValue object
+        expect(put.Item.PK).toBe('CHANGE#framework-13');
+        expect(put.Item.SK).toContain('#INSERT#TYPE#SERVICE#sshd.service#evt-1');
+        expect(put.Item.changeType).toBe('INSERT');
+        expect(put.Item.changeDevice).toBe('framework-13');
+        expect(put.Item.newSnapshot).toEqual({ name: 'sshd.service', status: 'active' });
+        // TTL: 7 days (TTL_DAYS env)
+        expect(put.Item.ttl).toBeGreaterThanOrEqual(before + 7 * 86400);
+        expect(put.Item.ttl).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 7 * 86400 + 5);
+    });
+
+    it('computes a diff from the data attribute on MODIFY events', async () => {
+        const event = streamEvent([{
+            eventName: 'MODIFY',
+            eventID: 'evt-2',
+            dynamodb: {
+                OldImage: image({
+                    deviceId: 'framework-13',
+                    recordType: 'SERVICE',
+                    id: 'sshd.service',
+                    data: { name: 'sshd.service', status: 'active' }
+                }),
+                NewImage: image({
+                    deviceId: 'framework-13',
+                    recordType: 'SERVICE',
+                    id: 'sshd.service',
+                    data: { name: 'sshd.service', status: 'inactive' }
+                })
+            }
+        }]);
+
+        const result = await handler(event);
+
+        expect(result).toEqual({ batchItemFailures: [] });
+        const put = mockSend.mock.calls[0][0];
+        expect(put.Item.changeType).toBe('MODIFY');
+        expect(put.Item.SK).toContain('#MODIFY#TYPE#SERVICE#sshd.service#evt-2');
+        expect(put.Item.diff).toEqual({ status: { old: 'active', new: 'inactive' } });
+        expect(put.Item.oldSnapshot).toEqual({ name: 'sshd.service', status: 'active' });
+        expect(put.Item.newSnapshot).toEqual({ name: 'sshd.service', status: 'inactive' });
+    });
+
+    it('writes a DELETE CHANGE# record for REMOVE events', async () => {
+        const event = streamEvent([{
+            eventName: 'REMOVE',
+            eventID: 'evt-3',
+            dynamodb: {
+                OldImage: image({
+                    deviceId: 'framework-13',
+                    recordType: 'ENV',
+                    id: 'HOME',
+                    data: { key: 'HOME', value: '/home/x' }
+                })
+            }
+        }]);
+
+        const result = await handler(event);
+
+        expect(result).toEqual({ batchItemFailures: [] });
+        const put = mockSend.mock.calls[0][0];
+        expect(put.Item.PK).toBe('CHANGE#framework-13');
+        expect(put.Item.SK).toContain('#DELETE#TYPE#ENV#HOME#evt-3');
+        expect(put.Item.changeType).toBe('DELETE');
+        expect(put.Item.oldSnapshot).toEqual({ key: 'HOME', value: '/home/x' });
+        expect(put.Item.newSnapshot).toBeUndefined();
+    });
+
+    it('skips INSERT records without a NewImage without failing the batch', async () => {
+        const event = streamEvent([{
+            eventName: 'INSERT',
+            eventID: 'evt-4',
+            dynamodb: { NewImage: null }
+        }]);
+
+        const result = await handler(event);
+
+        expect(result).toEqual({ batchItemFailures: [] });
+        expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    it('reports per-record failures via batchItemFailures and keeps processing', async () => {
+        mockSend.mockRejectedValueOnce(new Error('simulated DynamoDB outage'));
+
+        const makeRecord = (id) => ({
+            eventName: 'INSERT',
+            eventID: id,
+            dynamodb: {
+                NewImage: image({ deviceId: 'd1', recordType: 'PACKAGE', id, data: { name: id } })
             }
         });
-    });
 
-    it('should handle NULL type', () => {
-        const item = {
-            id: { S: '123' },
-            optionalField: { NULL: true }
-        };
+        const result = await handler(streamEvent([makeRecord('a'), makeRecord('b')]));
 
-        const result = unmarshallDynamoDB(item);
-
-        expect(result.optionalField).toBeNull();
-    });
-
-    it('should handle string sets and number sets', () => {
-        const item = {
-            categories: { SS: ['cat1', 'cat2', 'cat3'] },
-            priorities: { NS: ['1', '2', '3'] }
-        };
-
-        const result = unmarshallDynamoDB(item);
-
-        expect(result.categories).toEqual(['cat1', 'cat2', 'cat3']);
-        expect(result.priorities).toEqual([1, 2, 3]);
+        expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'a' }]);
+        // The second record was still processed
+        expect(mockSend).toHaveBeenCalledTimes(2);
     });
 });

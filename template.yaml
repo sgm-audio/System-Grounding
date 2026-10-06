@@ -104,6 +104,7 @@ Resources:
         ZipFile: |
           const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
           const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+          const { unmarshall } = require('@aws-sdk/util-dynamodb');
 
           const client = new DynamoDBClient({});
           const docClient = DynamoDBDocumentClient.from(client);
@@ -130,8 +131,13 @@ Resources:
                 const eventName = record.eventName;
                 const streamRecord = record.dynamodb;
 
+                // Stream images arrive as DynamoDB AttributeValue maps
+                // (e.g. deviceId: { S: 'framework-13' }); unmarshall them so
+                // keys, ids, and snapshots use plain values.
+                const newImage = streamRecord.NewImage ? unmarshall(streamRecord.NewImage) : undefined;
+                const oldImage = streamRecord.OldImage ? unmarshall(streamRecord.OldImage) : undefined;
+
                 if (eventName === 'REMOVE') {
-                  const oldImage = streamRecord.OldImage;
                   if (!oldImage) continue;
 
                   const deviceId = oldImage.deviceId;
@@ -143,7 +149,7 @@ Resources:
                     TableName: process.env.TABLE_NAME,
                     Item: {
                       PK: `CHANGE#${deviceId}`,
-                      SK: `${timestamp}#DELETE#TYPE#${recordType}#${id}`,
+                      SK: `${timestamp}#DELETE#TYPE#${recordType}#${id}#${record.eventID}`,
                       changeType: 'DELETE',
                       recordType: recordType,
                       deviceId: deviceId,
@@ -154,8 +160,6 @@ Resources:
                     }
                   }));
                 } else if (eventName === 'INSERT' || eventName === 'MODIFY') {
-                  const newImage = streamRecord.NewImage;
-                  const oldImage = streamRecord.OldImage;
                   if (!newImage) continue;
 
                   const deviceId = newImage.deviceId;
@@ -169,7 +173,7 @@ Resources:
                     TableName: process.env.TABLE_NAME,
                     Item: {
                       PK: `CHANGE#${deviceId}`,
-                      SK: `${timestamp}#${eventName}#TYPE#${recordType}#${id}`,
+                      SK: `${timestamp}#${eventName}#TYPE#${recordType}#${id}#${record.eventID}`,
                       changeType: eventName,
                       recordType: recordType,
                       deviceId: deviceId,
@@ -258,7 +262,16 @@ Resources:
             }
 
             try {
-              const body = JSON.parse(event.body);
+              const body = JSON.parse(event.body || '');
+
+              if (!body || typeof body !== 'object') {
+                return {
+                  statusCode: 400,
+                  headers: corsHeaders,
+                  body: JSON.stringify({ error: 'Invalid request. Requires deviceId and records array.' })
+                };
+              }
+
               const { deviceId, records } = body;
 
               if (!deviceId || !Array.isArray(records)) {
@@ -286,6 +299,7 @@ Resources:
                     id: id,
                     data: data,
                     lastCollected: new Date().toISOString(),
+                    stalenessThresholdSeconds: stalenessThresholdSeconds || 86400,
                     ttl: ttl
                   }
                 }));
@@ -299,11 +313,18 @@ Resources:
                 body: JSON.stringify({ success: true, results })
               };
             } catch (error) {
+              if (error instanceof SyntaxError) {
+                return {
+                  statusCode: 400,
+                  headers: corsHeaders,
+                  body: JSON.stringify({ error: 'Invalid JSON in request body' })
+                };
+              }
               console.error('Error ingesting records:', error);
               return {
                 statusCode: 500,
                 headers: corsHeaders,
-                body: JSON.stringify({ error: 'Internal server error', message: error.message })
+                body: JSON.stringify({ error: 'Internal server error' })
               };
             }
           };
@@ -377,7 +398,7 @@ Resources:
     Properties:
       RestApiId: !Ref IngestApi
       # Bump Description to force a new deployment into the existing prod stage.
-      Description: api-key-required-on-ingest-post-2026-07-23
+      Description: ingest-validation-staleness-sks-2026-10-05
       StageName: prod
 
   IngestApiKey:
