@@ -1,21 +1,39 @@
-```
 # Dependencies
 node_modules/
 venv/
 .venv/
+
+# Python artifacts
 __pycache__/
 *.egg-info/
 *.pyc
 *.pyo
 *.pyd
-*.so
-*.dylib
-*.dll
-*.exe
-*.o
-*.obj
-*.a
-*.lib
+
+# Build outputs
+.next/
+.vercel/
+coverage/
+htmlcov/
+dist/
+build/
+target/
+.gradle/
+zig-cache/
+zig-out/
+
+# Environment files
+.env
+.env.local
+.env.*
+
+# Test/tool caches
+.mypy_cache/
+.pytest_cache/
+.tox/
+nox/
+
+# Editor/OS files
 *.swp
 *.swo
 *.tmp
@@ -24,23 +42,16 @@ __pycache__/
 *.~*
 .DS_Store
 Thumbs.db
-.env
-.env.local
-.env.*
-coverage/
-htmlcov/
-.coverage
-.mypy_cache/
-.pytest_cache/
-.tox/
-nox/
-dist/
-build/
-target/
-.gradle/
-.julia/
-zig-cache/
-zig-out/
+
+# Compiled objects and archives
+*.so
+*.dylib
+*.dll
+*.exe
+*.o
+*.obj
+*.a
+*.lib
 *.zip
 *.gz
 *.tar
@@ -63,4 +74,3 @@ zig-out/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```
