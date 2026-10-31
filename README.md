@@ -1,6 +1,8 @@
 # System Grounding
 
-Ground AI queries in verified local system state to eliminate hallucinations about packages, configs, and services.
+Feeds an AI assistant verified facts about a machine (installed packages, configs, services) so its answers about that machine come from recorded state instead of guesses. An agent collects the state, an AWS Lambda/DynamoDB backend stores it, and a dashboard and MCP server query it.
+
+The LLM answer in the demo dashboard is simulated for now. `/api/ask` returns the verified context with a canned response (see the note under step 3 below).
 
 ## Architecture
 
