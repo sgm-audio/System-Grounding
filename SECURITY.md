@@ -12,7 +12,7 @@ If you believe you have found a security vulnerability in this repository
 open a public issue.
 
 - Contact the repository owner privately (GitHub: report via
-  [private vulnerability reporting](../../security/advisories/new) if enabled,
+  [private vulnerability reporting](https://github.com/sgm-audio/System-Grounding/security/advisories/new) if enabled,
   or reach out to the maintainer directly).
 - Include what you found, where it is (file/line or resource), and a
   reproduction if possible.

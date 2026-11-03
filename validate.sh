@@ -99,8 +99,7 @@ if command -v cfn-lint &> /dev/null; then
         test_fail "CloudFormation template linting failed"
     fi
 else
-    log_warn "cfn-lint not installed. Install with: pip install cfn-lint"
-    test_pass "CloudFormation linting skipped (cfn-lint not installed)"
+    log_warn "cfn-lint not installed, so CloudFormation linting was SKIPPED (not counted as a pass). Install with: pip install cfn-lint"
 fi
 
 # 2b. ESLint for JavaScript/TypeScript (if configured)
